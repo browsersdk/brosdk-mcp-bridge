@@ -1,0 +1,10 @@
+{
+  "name": "brosdk-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check scripts/build.mjs && node --check src/background.js && node --check src/popup.js && node --check src/options.js"
+  }
+}

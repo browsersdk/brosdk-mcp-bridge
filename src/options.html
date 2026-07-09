@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>BroSDK MCP Bridge Options</title>
+    <style>
+      body {
+        max-width: 620px;
+        margin: 32px auto;
+        padding: 0 18px;
+        font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #202124;
+      }
+
+      h1 {
+        margin: 0 0 18px;
+        font-size: 22px;
+        font-weight: 650;
+      }
+
+      .hint {
+        margin: -10px 0 18px;
+        color: #5f6368;
+        font-size: 13px;
+      }
+
+      button {
+        padding: 8px 12px;
+        border: 1px solid #dadce0;
+        border-radius: 6px;
+        background: #fff;
+        color: #1a73e8;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #status {
+        margin-top: 16px;
+        min-height: 22px;
+      }
+
+      .connection {
+        margin-top: 22px;
+        padding: 14px;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        background: #f8fafd;
+      }
+
+      .connection-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .connection-title {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        margin-top: 10px;
+        font-weight: 650;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #9aa0a6;
+      }
+
+      .dot.ok {
+        background: #137333;
+      }
+
+      .dot.error {
+        background: #a50e0e;
+      }
+
+      .details {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 6px 12px;
+        margin: 12px 0 0;
+      }
+
+      .details dt {
+        color: #5f6368;
+      }
+
+      .details dd {
+        margin: 0;
+        word-break: break-word;
+      }
+
+      .ok {
+        color: #137333;
+      }
+
+      .error {
+        color: #a50e0e;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>BroSDK MCP Bridge</h1>
+    <div class="hint">The extension connects through BroSDK's internal host <code>http://mcp.brosdk.internal</code>.</div>
+    <section class="connection" aria-live="polite">
+      <div class="connection-header">
+        <h2 class="connection-title">Connection status</h2>
+        <button id="refresh" type="button">Reconnect</button>
+      </div>
+      <div class="status-pill">
+        <span id="connectionDot" class="dot"></span>
+        <span id="connectionText">Checking...</span>
+      </div>
+      <dl class="details">
+        <dt>Server</dt>
+        <dd id="serverUrl">-</dd>
+        <dt>Browser ID</dt>
+        <dd id="browserId">-</dd>
+        <dt>Tabs</dt>
+        <dd id="tabs">-</dd>
+        <dt>Windows</dt>
+        <dd id="windows">-</dd>
+        <dt>Groups</dt>
+        <dd id="groups">-</dd>
+        <dt>Last seen</dt>
+        <dd id="lastSeen">-</dd>
+      </dl>
+    </section>
+    <div id="status"></div>
+    <script src="options.js"></script>
+  </body>
+</html>

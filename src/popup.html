@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>BroSDK MCP Bridge</title>
+    <style>
+      body {
+        width: 280px;
+        margin: 0;
+        padding: 14px;
+        font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #202124;
+        background: #fff;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 15px;
+        font-weight: 650;
+      }
+
+      dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 10px;
+        margin: 10px 0 0;
+      }
+
+      dt {
+        color: #5f6368;
+      }
+
+      dd {
+        margin: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .status {
+        display: inline-block;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: #fce8e6;
+        color: #a50e0e;
+      }
+
+      .status.ok {
+        background: #e6f4ea;
+        color: #137333;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 12px;
+        padding: 7px 10px;
+        border: 1px solid #dadce0;
+        border-radius: 6px;
+        background: #fff;
+        color: #1a73e8;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>BroSDK MCP Bridge</h1>
+    <div id="message">Checking BroSDK MCP bridge...</div>
+    <dl>
+      <dt>Status</dt>
+      <dd><span id="status" class="status">offline</span></dd>
+      <dt>Tabs</dt>
+      <dd id="tabs">0</dd>
+      <dt>Windows</dt>
+      <dd id="windows">0</dd>
+      <dt>Groups</dt>
+      <dd id="groups">0</dd>
+    </dl>
+    <button id="options" type="button">Settings</button>
+    <script src="popup.js"></script>
+  </body>
+</html>
