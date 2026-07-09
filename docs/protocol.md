@@ -40,8 +40,8 @@ The extension connects to:
 GET /extension/ws
 ```
 
-After the socket opens, the extension sends a `hello` message and then publishes
-a fresh `state` snapshot.
+After the socket opens, the extension sends a `hello` message and immediately
+publishes a fresh `state` snapshot without debounce.
 
 Client to server:
 
@@ -76,6 +76,18 @@ Server to client command:
   }
 }
 ```
+
+Server to client state sync request:
+
+```json
+{
+  "type": "sync"
+}
+```
+
+The server sends a `sync` message when it accepts the WebSocket connection and
+again after it receives the extension `hello`. The extension must respond by
+immediately publishing a complete `state` snapshot without debounce.
 
 Client to server command result:
 

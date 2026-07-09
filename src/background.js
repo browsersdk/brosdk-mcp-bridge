@@ -5,6 +5,8 @@ const CAPABILITIES = ['tabs', 'windows', 'tabGroups', 'bookmarks', 'history'];
 const LOG_PREFIX = '[brosdk-mcp-bridge]';
 const SYNC_DEBOUNCE_MS = 150;
 const RETRY_DELAY_MS = 2000;
+const KEEPALIVE_ALARM_NAME = 'brosdk-mcp-bridge-keepalive';
+const KEEPALIVE_PERIOD_MINUTES = 1;
 
 let sequence = 0;
 let syncTimer = null;
@@ -16,21 +18,22 @@ let bridgeSocketBaseUrl = null;
 let bridgeSocketReconnectTimer = null;
 
 chrome.runtime.onInstalled.addListener(() => {
-  scheduleSync();
-  startWebSocket();
-  startPolling();
+  ensureKeepaliveAlarm();
+  kickBridge();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  scheduleSync();
-  startWebSocket();
-  startPolling();
+  ensureKeepaliveAlarm();
+  kickBridge();
 });
 
 chrome.action.onClicked.addListener(() => {
-  scheduleSync();
-  startWebSocket();
-  startPolling();
+  kickBridge();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM_NAME) return;
+  kickBridge();
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -46,9 +49,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 registerLifecycleListeners();
-startWebSocket();
-startPolling();
-scheduleSync();
+ensureKeepaliveAlarm();
+kickBridge();
+
+function ensureKeepaliveAlarm() {
+  chrome.alarms.create(KEEPALIVE_ALARM_NAME, {
+    delayInMinutes: KEEPALIVE_PERIOD_MINUTES,
+    periodInMinutes: KEEPALIVE_PERIOD_MINUTES,
+  });
+}
+
+function kickBridge() {
+  startWebSocket();
+  startPolling();
+  syncStateNow().catch((error) => {
+    console.warn(LOG_PREFIX, 'keepalive sync failed', error);
+  });
+}
 
 function registerLifecycleListeners() {
   chrome.tabs.onCreated.addListener(scheduleSync);
@@ -79,6 +96,14 @@ function scheduleSync() {
       console.warn(LOG_PREFIX, 'sync failed', error);
     });
   }, SYNC_DEBOUNCE_MS);
+}
+
+async function syncStateNow() {
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  await syncState();
 }
 
 async function syncState() {
@@ -263,7 +288,7 @@ async function startWebSocket() {
       type: 'hello',
       ...buildHelloPayload(await getBrowserId()),
     });
-    scheduleSync();
+    await syncStateNow();
   });
 
   socket.addEventListener('message', (event) => {
@@ -294,6 +319,10 @@ async function handleWebSocketMessage(raw) {
   const message = JSON.parse(String(raw));
   if (message.type === 'command' && message.command) {
     await handleCommand(message.command, 'websocket');
+    return;
+  }
+  if (message.type === 'sync') {
+    await syncStateNow();
     return;
   }
   if (message.type === 'hello' || message.type === 'pong' || message.type === 'health') {
