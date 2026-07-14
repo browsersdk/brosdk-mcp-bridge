@@ -5,25 +5,35 @@ const CAPABILITIES = ['tabs', 'windows', 'tabGroups', 'bookmarks', 'history'];
 const LOG_PREFIX = '[brosdk-mcp-bridge]';
 const SYNC_DEBOUNCE_MS = 150;
 const RETRY_DELAY_MS = 2000;
+const HTTP_REQUEST_TIMEOUT_MS = 5000;
+const COMMAND_POLL_TIMEOUT_MS = 30000;
 const KEEPALIVE_ALARM_NAME = 'brosdk-mcp-bridge-keepalive';
 const KEEPALIVE_PERIOD_MINUTES = 1;
+const MAX_COMMAND_RECORDS = 256;
 
 let sequence = 0;
 let syncTimer = null;
+let syncPending = false;
+let syncInFlight = null;
 let polling = false;
 let browserIdPromise = null;
 let mcpBaseUrlPromise = null;
 let bridgeSocket = null;
-let bridgeSocketBaseUrl = null;
 let bridgeSocketReconnectTimer = null;
+let activePollController = null;
+const commandRecords = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
-  ensureKeepaliveAlarm();
+  ensureKeepaliveAlarm().catch((error) => {
+    console.warn(LOG_PREFIX, 'could not create keepalive alarm', error);
+  });
   kickBridge();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  ensureKeepaliveAlarm();
+  ensureKeepaliveAlarm().catch((error) => {
+    console.warn(LOG_PREFIX, 'could not create keepalive alarm', error);
+  });
   kickBridge();
 });
 
@@ -49,19 +59,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 registerLifecycleListeners();
-ensureKeepaliveAlarm();
+ensureKeepaliveAlarm().catch((error) => {
+  console.warn(LOG_PREFIX, 'could not create keepalive alarm', error);
+});
 kickBridge();
 
-function ensureKeepaliveAlarm() {
-  chrome.alarms.create(KEEPALIVE_ALARM_NAME, {
+async function ensureKeepaliveAlarm() {
+  const alarm = await chrome.alarms.get(KEEPALIVE_ALARM_NAME);
+  if (alarm?.periodInMinutes === KEEPALIVE_PERIOD_MINUTES) return;
+  await chrome.alarms.create(KEEPALIVE_ALARM_NAME, {
     delayInMinutes: KEEPALIVE_PERIOD_MINUTES,
     periodInMinutes: KEEPALIVE_PERIOD_MINUTES,
   });
 }
 
 function kickBridge() {
-  startWebSocket();
-  startPolling();
+  startWebSocket().catch((error) => {
+    console.warn(LOG_PREFIX, 'websocket start failed', error);
+    scheduleWebSocketReconnect();
+  });
+  startPolling().catch((error) => {
+    polling = false;
+    console.warn(LOG_PREFIX, 'command polling stopped', error);
+  });
   syncStateNow().catch((error) => {
     console.warn(LOG_PREFIX, 'keepalive sync failed', error);
   });
@@ -92,7 +112,7 @@ function scheduleSync() {
   if (syncTimer) clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
     syncTimer = null;
-    syncState().catch((error) => {
+    requestStateSync().catch((error) => {
       console.warn(LOG_PREFIX, 'sync failed', error);
     });
   }, SYNC_DEBOUNCE_MS);
@@ -103,17 +123,41 @@ async function syncStateNow() {
     clearTimeout(syncTimer);
     syncTimer = null;
   }
-  await syncState();
+  await requestStateSync();
 }
 
-async function syncState() {
-  const [browserId, tabs, windows, groups, targets] = await Promise.all([
+function requestStateSync() {
+  syncPending = true;
+  if (!syncInFlight) {
+    syncInFlight = runStateSyncLoop().finally(() => {
+      syncInFlight = null;
+    });
+  }
+  return syncInFlight;
+}
+
+async function runStateSyncLoop() {
+  let lastError = null;
+  while (syncPending) {
+    syncPending = false;
+    try {
+      await publishStateSnapshot();
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+}
+
+async function publishStateSnapshot() {
+  const [browserId, windows, groups, targets] = await Promise.all([
     getBrowserId(),
-    chrome.tabs.query({}),
     chrome.windows.getAll({ populate: true }),
     listTabGroups(),
-    chrome.debugger.getTargets(),
+    getDebuggerTargets(),
   ]);
+  const tabs = windows.flatMap((window) => window.tabs ?? []);
 
   const targetByTabId = new Map();
   for (const target of targets) {
@@ -138,6 +182,15 @@ async function syncState() {
 
   if (sendWebSocketMessage({ type: 'state', snapshot: payload })) return;
   await postJson('/extension/state', payload);
+}
+
+async function getDebuggerTargets() {
+  try {
+    return await chrome.debugger.getTargets();
+  } catch (error) {
+    console.warn(LOG_PREFIX, 'debugger target lookup failed', error);
+    return [];
+  }
 }
 
 function normalizeTab(tab, targetId) {
@@ -200,61 +253,121 @@ async function startPolling() {
   if (polling) return;
   polling = true;
 
-  while (polling) {
-    try {
-      if (isWebSocketOpen()) {
+  try {
+    while (polling) {
+      try {
+        if (isWebSocketOpen()) {
+          await delay(RETRY_DELAY_MS);
+          continue;
+        }
+
+        await postJson('/extension/hello', buildHelloPayload(await getBrowserId()));
+        if (isWebSocketOpen()) continue;
+
+        const baseUrl = await getMcpBaseUrl();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), COMMAND_POLL_TIMEOUT_MS);
+        activePollController = controller;
+
+        let response;
+        try {
+          response = await fetch(`${baseUrl}/extension/commands?timeoutMs=25000`, {
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+          if (activePollController === controller) activePollController = null;
+        }
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.json();
+        if (body.command) {
+          await handleCommand(body.command);
+        }
+      } catch (error) {
+        if (isAbortError(error) && isWebSocketOpen()) continue;
+        console.warn(LOG_PREFIX, 'command poll failed', error);
+        resetMcpBaseUrl();
         await delay(RETRY_DELAY_MS);
-        continue;
       }
-      await postJson('/extension/hello', buildHelloPayload(await getBrowserId()));
-      const baseUrl = await getMcpBaseUrl();
-      const response = await fetch(`${baseUrl}/extension/commands?timeoutMs=25000`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await response.json();
-      if (body.command) {
-        await handleCommand(body.command);
-      }
-    } catch (error) {
-      console.warn(LOG_PREFIX, 'command poll failed', error);
-      resetMcpBaseUrl();
-      await delay(RETRY_DELAY_MS);
     }
+  } finally {
+    abortActivePoll();
+    polling = false;
   }
 }
 
 async function handleCommand(command, transport = 'http') {
+  const commandId = typeof command?.id === 'string' ? command.id : '';
+  if (!commandId) throw new Error('Command id is required.');
+
+  let record = commandRecords.get(commandId);
+  const isNewCommand = !record;
+
+  if (!record) {
+    record = {
+      commandId,
+      resultMessage: null,
+      executionPromise: null,
+      deliveryPromise: null,
+      delivered: false,
+    };
+    record.executionPromise = executeCommand(command)
+      .then((result) => {
+        record.resultMessage = { ok: true, result };
+      })
+      .catch((error) => {
+        record.resultMessage = { ok: false, error: normalizeError(error) };
+      });
+    commandRecords.set(commandId, record);
+  }
+
   try {
-    const result = await executeCommand(command);
-    await syncState().catch((error) => {
-      console.warn(LOG_PREFIX, 'post-command sync failed', error);
-    });
-    if (transport === 'websocket' && sendWebSocketMessage({
-      type: 'commandResult',
-      commandId: command.id,
-      ok: true,
-      result,
-    })) {
-      return;
-    }
-    await postJson(`/extension/commands/${encodeURIComponent(command.id)}/result`, {
-      ok: true,
-      result,
-    });
-  } catch (error) {
-    if (transport === 'websocket' && sendWebSocketMessage({
-      type: 'commandResult',
-      commandId: command.id,
-      ok: false,
-      error: normalizeError(error),
-    })) {
-      return;
-    }
-    await postJson(`/extension/commands/${encodeURIComponent(command.id)}/result`, {
-      ok: false,
-      error: normalizeError(error),
-    });
+    await record.executionPromise;
+    await deliverCommandResult(record, transport);
   } finally {
-    scheduleSync();
+    if (isNewCommand) {
+      requestStateSync().catch((error) => {
+        console.warn(LOG_PREFIX, 'post-command sync failed', error);
+      });
+    }
+  }
+}
+
+function deliverCommandResult(record, transport) {
+  if (record.delivered) return Promise.resolve();
+  if (record.deliveryPromise) return record.deliveryPromise;
+
+  const websocketMessage = {
+    type: 'commandResult',
+    commandId: record.commandId,
+    ...record.resultMessage,
+  };
+
+  record.deliveryPromise = (async () => {
+    if (transport === 'websocket' && sendWebSocketMessage(websocketMessage)) {
+      record.delivered = true;
+    } else {
+      await postJson(
+        `/extension/commands/${encodeURIComponent(record.commandId)}/result`,
+        record.resultMessage,
+      );
+      record.delivered = true;
+    }
+    trimCommandRecords();
+  })().finally(() => {
+    record.deliveryPromise = null;
+  });
+
+  return record.deliveryPromise;
+}
+
+function trimCommandRecords() {
+  if (commandRecords.size <= MAX_COMMAND_RECORDS) return;
+  for (const [commandId, record] of commandRecords) {
+    if (!record.delivered) continue;
+    commandRecords.delete(commandId);
+    if (commandRecords.size <= MAX_COMMAND_RECORDS) return;
   }
 }
 
@@ -277,28 +390,26 @@ async function startWebSocket() {
     return;
   }
 
-  bridgeSocketBaseUrl = baseUrl;
   const wsUrl = websocketUrlForBaseUrl(baseUrl);
   const socket = new WebSocket(wsUrl);
   bridgeSocket = socket;
 
-  socket.addEventListener('open', async () => {
-    console.info(LOG_PREFIX, 'websocket connected', wsUrl);
-    sendWebSocketMessage({
-      type: 'hello',
-      ...buildHelloPayload(await getBrowserId()),
+  socket.addEventListener('open', () => {
+    handleWebSocketOpen(socket, wsUrl).catch((error) => {
+      console.warn(LOG_PREFIX, 'websocket initialization failed', error);
     });
-    await syncStateNow();
   });
 
   socket.addEventListener('message', (event) => {
+    if (bridgeSocket !== socket) return;
     handleWebSocketMessage(event.data).catch((error) => {
       console.warn(LOG_PREFIX, 'websocket message failed', error);
     });
   });
 
   socket.addEventListener('close', () => {
-    if (bridgeSocket === socket) bridgeSocket = null;
+    if (bridgeSocket !== socket) return;
+    bridgeSocket = null;
     console.info(LOG_PREFIX, 'websocket disconnected');
     resetMcpBaseUrl();
     scheduleWebSocketReconnect();
@@ -315,6 +426,24 @@ async function startWebSocket() {
   });
 }
 
+async function handleWebSocketOpen(socket, wsUrl) {
+  if (bridgeSocket !== socket) {
+    socket.close();
+    return;
+  }
+
+  abortActivePoll();
+  console.info(LOG_PREFIX, 'websocket connected', wsUrl);
+  const browserId = await getBrowserId();
+  if (bridgeSocket !== socket || socket.readyState !== WebSocket.OPEN) return;
+
+  sendWebSocketMessage({
+    type: 'hello',
+    ...buildHelloPayload(browserId),
+  }, socket);
+  await syncStateNow();
+}
+
 async function handleWebSocketMessage(raw) {
   const message = JSON.parse(String(raw));
   if (message.type === 'command' && message.command) {
@@ -325,6 +454,10 @@ async function handleWebSocketMessage(raw) {
     await syncStateNow();
     return;
   }
+  if (message.type === 'ping') {
+    sendWebSocketMessage({ type: 'pong' });
+    return;
+  }
   if (message.type === 'hello' || message.type === 'pong' || message.type === 'health') {
     return;
   }
@@ -333,10 +466,15 @@ async function handleWebSocketMessage(raw) {
   }
 }
 
-function sendWebSocketMessage(message) {
-  if (!isWebSocketOpen()) return false;
-  bridgeSocket.send(JSON.stringify(message));
-  return true;
+function sendWebSocketMessage(message, socket = bridgeSocket) {
+  if (!socket || socket !== bridgeSocket || socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch (error) {
+    console.warn(LOG_PREFIX, 'websocket send failed', error);
+    return false;
+  }
 }
 
 function isWebSocketOpen() {
@@ -363,6 +501,7 @@ function clearWebSocketReconnect() {
 
 function closeWebSocket() {
   clearWebSocketReconnect();
+  abortActivePoll();
   if (bridgeSocket) {
     const socket = bridgeSocket;
     bridgeSocket = null;
@@ -372,6 +511,18 @@ function closeWebSocket() {
       // Ignore close races.
     }
   }
+}
+
+function abortActivePoll() {
+  if (!activePollController) return;
+  const controller = activePollController;
+  activePollController = null;
+  controller.abort();
+}
+
+function isAbortError(error) {
+  return error instanceof DOMException &&
+    (error.name === 'AbortError' || error.name === 'TimeoutError');
 }
 
 function websocketUrlForBaseUrl(baseUrl) {
@@ -569,13 +720,29 @@ function normalizeHistoryEntry(entry) {
 
 async function postJson(path, payload) {
   const baseUrl = await getMcpBaseUrl();
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, HTTP_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.text();
+    return body ? JSON.parse(body) : null;
+  } catch (error) {
+    if (timedOut) throw new Error(`HTTP request timed out: ${path}`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function handleRuntimeMessage(message) {
@@ -595,10 +762,10 @@ async function handleRuntimeMessage(message) {
   if (message.type === 'reconnect') {
     resetMcpBaseUrl();
     closeWebSocket();
-    startWebSocket();
+    await startWebSocket();
     const baseUrl = await getMcpBaseUrl();
     await postJson('/extension/hello', buildHelloPayload(await getBrowserId()));
-    await syncState();
+    await syncStateNow();
     return { ok: true, baseUrl };
   }
 

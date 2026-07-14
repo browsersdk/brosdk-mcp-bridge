@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check scripts/build.mjs && node --check src/background.js && node --check src/popup.js && node --check src/options.js"
+    "check": "node --check scripts/build.mjs && node --check src/background.js && node --check src/popup.js && node --check src/options.js",
+    "test": "node --test"
   }
 }

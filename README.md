@@ -36,6 +36,7 @@ Run syntax checks before packaging or publishing changes:
 
 ```bash
 npm run check
+npm test
 ```
 
 ## Runtime Behavior
@@ -49,6 +50,9 @@ When the socket closes or command polling fails, the extension waits 2 seconds
 and reconnects to `http://mcp.brosdk.internal`. After reconnecting, it sends a
 fresh `hello` message and publishes a full browser state snapshot.
 
+A periodic alarm wakes the service worker once per minute to verify the
+connection and publish a fresh snapshot.
+
 The extension uses `chrome.debugger.getTargets()` to map `chrome.tabs` tab IDs to
 CDP target IDs. It does not attach to pages; page automation remains in the MCP
 server's CDP connection.
@@ -59,5 +63,6 @@ server's CDP connection.
 - `bookmarks`, `history`: serve MCP bookmark and history commands.
 - `debugger`: read debugger targets for `tabId <-> targetId` mapping.
 - `storage`: keep a browser ID for diagnostics.
+- `alarms`: periodically wake the service worker for reconnect and state sync.
 - `host_permissions`: send bridge snapshots and command results to
   `http://mcp.brosdk.internal`.
